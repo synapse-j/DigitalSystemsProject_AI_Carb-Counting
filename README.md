@@ -1,200 +1,115 @@
 # AI Carbohydrate Counting for Type 1 Diabetes
-**Jake Richardson-Price — BSc Digital Systems — Dissertation Project**
+**Jake Richardson-Price — BSc Digital Systems — Final Year Dissertation**
 
 ---
 
-## Overview
+## What is this project?
 
-Type 1 diabetes (T1D) affects over 225,000 people in the UK. Individuals with T1D must manually estimate the carbohydrate content of every meal to calculate the correct insulin dose — a cognitively demanding task that directly impacts blood glucose control and quality of life.
+People with Type 1 diabetes have to count the carbohydrates in every meal they eat so they can work out how much insulin to inject. Get it wrong and blood sugar either spikes or crashes — both of which are dangerous. It's a task most people have to do multiple times a day, every day, for life.
 
-This project investigates whether artificial intelligence can reliably estimate carbohydrate content from food images, and compares two fundamentally different AI approaches:
+I wanted to see if AI could help with this. Specifically, I trained a image classification model on food photos and asked it to predict which "carb range" a meal falls into. I then compared how well it did against GPT-5, which can look at a photo and answer questions about it without any specialised training.
 
-- **A cascaded machine learning pipeline** — two fine-tuned ResNet-50 convolutional neural networks working in sequence: one identifies the food, a second estimates the portion size, and a lookup table combines both into a carbohydrate range
-- **Large language models** — Claude (Anthropic) and GPT-4o (OpenAI) asked to estimate carbohydrate content directly from the same images in a single step
-
-Performance is evaluated using classification accuracy, per-class F1 score, and a **clinically acceptable accuracy metric** (proportion of predictions within ±1 carbohydrate range, approximately ±20g), based on the clinical threshold established by Özkaya et al. (2026).
+The core question I'm trying to answer: **does training a model specifically for this task beat just asking a general-purpose AI?**
 
 ---
 
-## Research Question
+## How does it work?
 
-*Can a purpose-built cascaded ML pipeline match or exceed the carbohydrate estimation accuracy of general-purpose large language models when classifying food images into clinically relevant carbohydrate ranges?*
+### The ML model (ResNet-50)
+
+I took ResNet-50 — a well-known image classification network — and fine-tuned it on the Food-101 dataset to predict which of 5 carbohydrate ranges a meal falls into. Rather than using a standard loss function, I wrote a custom one that combines three ideas:
+
+- **Class weighting** — some carb ranges appear far more in the dataset than others, so I weighted the loss to stop the model just guessing the most common range
+- **Focal loss** — borrowed from Lin et al. (2017), this pushes the model to focus harder on the examples it keeps getting wrong rather than coasting on the easy ones
+- **Ordinal penalty** — being off by 2 ranges is much worse than being off by 1 (clinically speaking it could mean the wrong insulin dose), so I added an extra penalty that scales with how far off the prediction is
+
+At evaluation time I also use **Test-Time Augmentation** — running each image through the model 8 times with slightly different crops and lighting, then averaging the predictions. It adds a couple of percent accuracy for free.
+
+### The LLM comparison (GPT-5)
+
+I sent the same test images to GPT-5 with a prompt explaining the task and asked it to classify each image into one of the 5 ranges. No training, no fine-tuning — just the model reasoning from the photo.
 
 ---
 
-## Carbohydrate Ranges
+## Carbohydrate ranges
 
-Predictions are classified into five ranges reflecting clinical dosing thresholds:
+I split meals into 5 ranges based on carbohydrate content:
 
-| Range | Grams   | Clinical Context                          |
+| Range | Carbs   | Example foods                             |
 |-------|---------|-------------------------------------------|
-| 0     | 0–20g   | Very low — salads, eggs, plain proteins   |
-| 1     | 21–40g  | Low — soups, light sandwiches             |
-| 2     | 41–60g  | Medium — pasta, pizza slice, rice dish    |
-| 3     | 61–80g  | High — large burger, cake, big pasta      |
-| 4     | 81g+    | Very high — large desserts, big portions  |
+| 0     | 0–20g   | Salads, eggs, grilled meat               |
+| 1     | 21–40g  | Soups, light sandwiches                  |
+| 2     | 41–60g  | Pasta, pizza, rice dishes                |
+| 3     | 61–80g  | Large burgers, cake, big pasta portions  |
+| 4     | 81g+    | Large desserts, big portions of starchy food |
 
-An error of ±1 range (≈±20g) is considered clinically acceptable. Errors beyond ±20g can meaningfully affect blood glucose levels (Özkaya et al., 2026).
-
----
-
-## System Architecture
-
-```
-Food Image
-    │
-    ├──► Stage 1: ResNet-50 (Food Classifier)
-    │         Identifies what food is in the image
-    │         101 classes from the Food-101 dataset
-    │
-    ├──► Stage 2: ResNet-50 (Portion Estimator)
-    │         Estimates how much food is present
-    │         3 classes: small / medium / large
-    │
-    └──► Lookup Table
-              Combines food category + portion size
-              → Carbohydrate range prediction (0–4)
-
-
-Food Image ──► Claude / GPT-4o (LLM)
-                    Single-step carb range prediction
-                    No specialised training required
-```
-
-The cascade separates two visually distinct tasks — food identity and portion size — that compete for the same feature space in a single model. This is the core methodological hypothesis tested by the project.
+Being off by ±1 range (roughly ±20g of carbs) is considered clinically acceptable — a small insulin adjustment can compensate. Being off by ±2 or more ranges is flagged as "dangerous" in my results, as that level of error could meaningfully affect blood glucose.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 carb-counting-t1d/
-├── config.py                  ← all settings and carb lookup table
-├── run.py                     ← single entry point for all stages
+├── config.py                  ← settings, and a lookup table of carb values per food
+├── run.py                     ← run everything from here
 ├── requirements.txt
-├── .env.example               ← copy to .env, add your API keys
 │
 ├── pipeline/
-│   ├── dataset.py             ← downloads Food-101, builds datasets
-│   ├── train_stage1.py        ← trains ResNet-50 food classifier
-│   ├── train_stage2.py        ← trains ResNet-50 portion estimator
-│   └── cascade.py             ← runs full pipeline, generates metrics
+│   ├── dataset.py             ← downloads Food-101, sorts images into carb range folders
+│   ├── train_direct.py        ← trains the ResNet-50 model
+│   └── evaluate_direct.py     ← evaluates the trained model, saves figures
 │
 ├── evaluation/
-│   ├── llm_eval.py            ← evaluates Claude and/or GPT-4o
-│   └── compare.py             ← generates dissertation figures and table
+│   ├── llm_eval.py            ← sends test images to GPT-5 and saves the results
+│   └── compare.py             ← generates the comparison charts for my dissertation
 │
-├── data/                      ← created automatically (not on GitHub)
-├── models/                    ← saved model checkpoints (not on GitHub)
-└── results/                   ← output figures and JSON (not on GitHub)
+├── data/                      ← created automatically when you run --stage data
+├── models/                    ← model checkpoints saved here during training
+└── results/                   ← all output figures and JSON results end up here
 ```
+
+
 
 ---
 
-## Setup
+## Running it
+
+Everything runs through `run.py`:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/carb-counting-t1d.git
-cd carb-counting-t1d
-
-# 2. Create and activate a virtual environment
-python -m venv venv
-venv\Scripts\activate          # Windows
-source venv/bin/activate       # Mac / Linux
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Add API keys
-cp .env.example .env           # Mac / Linux
-copy .env.example .env         # Windows
-# Open .env and fill in your Anthropic and/or OpenAI API keys
-```
-
----
-
-## Running the Project
-
-All stages are controlled through a single entry point:
-
-```bash
-# Run the full pipeline from start to finish
+# Run the whole pipeline start to finish
 python run.py
 
-# Or run individual stages
-python run.py --stage data       # Download Food-101 and prepare datasets
-python run.py --stage train      # Train both ResNet-50 models
-python run.py --stage cascade    # Run ML pipeline evaluation
-python run.py --stage llm --limit 25   # Test LLM evaluation cheaply first
-python run.py --stage llm        # Full LLM evaluation
-python run.py --stage compare    # Generate dissertation figures
+# Or run one stage at a time
+python run.py --stage data       # Download Food-101 and sort images into carb ranges
+python run.py --stage train      # Train the ResNet-50 model (this takes a while)
+python run.py --stage evaluate   # Evaluate the trained model on the test set
+python run.py --stage llm --limit 25   # Quick GPT-5 test on 25 images (~£0.50)
+python run.py --stage llm        # Full GPT-5 evaluation
+python run.py --stage compare    # Generate the dissertation figures
 ```
-
-### Estimated runtimes
-
-| Stage | CPU | GPU |
-|-------|-----|-----|
-| Data preparation | ~30 mins | ~30 mins |
-| Stage 1 training | ~4–6 hrs | ~30 mins |
-| Stage 2 training | ~2–3 hrs | ~20 mins |
-| Cascade evaluation | ~10 mins | ~5 mins |
-| LLM evaluation (100 images) | ~15 mins | ~15 mins |
-
-A GPU is strongly recommended for training. Google Colab (free tier) provides sufficient GPU time for a full training run.
-
----
-
 ## Dataset
 
-**Food-101** is downloaded automatically when you run `--stage data`. No manual download required.
+The project uses **Food-101** — 101 food categories with 1,000 images each (101,000 total). It downloads automatically when you run `--stage data`, so there's nothing to set up manually. It's about 5GB and is free to use for academic research (Bossard et al., 2014).
 
-- 101 food categories, 1,000 images each (101,000 images total)
-- ~5 GB download from ETH Zurich servers
-- Free for academic research use
-- Citation: Bossard et al. (2014), ECCV
+The carbohydrate values in `config.py` were looked up manually on the USDA FoodData Central database. Each entry has a comment showing where the value came from.
 
-Carbohydrate reference values in `config.py` are sourced from the USDA FoodData Central database and cross-referenced with Nutritionix. Values represent a typical single serving with documented ranges reflecting recipe variation.
 
----
+## Output files
 
-## API Keys
-
-LLM evaluation (optional) requires API access:
-
-| Provider | Where to get a key | Estimated cost (100 images) |
-|----------|-------------------|----------------------------|
-| Anthropic (Claude) | console.anthropic.com | ~£2 |
-| OpenAI (GPT-4o) | platform.openai.com | ~£3 |
-
-Always test with `--limit 25` before running the full evaluation set.
-
----
-
-## Output Files
-
-Running the full pipeline produces the following in `results/`:
+After running the full pipeline, the `results/` folder will contain:
 
 ```
 results/
-├── fig1_accuracy.png             ← main comparison bar chart
-├── fig2_f1_per_class.png         ← per-class F1 scores
-├── fig3_radar.png                ← multi-metric radar chart
-├── cm_cascaded_resnet-50.png     ← ML pipeline confusion matrix
-├── cm_claude.png                 ← Claude confusion matrix
-├── cm_gpt4o.png                  ← GPT-4o confusion matrix
-├── summary_table.txt             ← copy-paste results table
-├── cascade_results.json
-├── claude_results.json
-├── gpt4o_results.json
+├── fig1_accuracy.png          ← main comparison chart (ResNet-50 vs GPT-5)
+├── fig2_f1_per_class.png      ← F1 scores broken down by carb range
+├── fig3_radar.png             ← radar chart comparing multiple metrics at once
+├── cm_resnet50.png            ← confusion matrix for the ResNet-50 model
+├── per_range_accuracy.png     ← bar chart showing accuracy per carb range
+├── summary_table.txt          ← results table I copied into my dissertation
+├── resnet50_results.json
+├── gpt5_results.json
 └── all_results.json
 ```
 
----
-
-## References
-
-- Özkaya, V., Eren, E., Özgen Özkaya, Ş., & Özkaya, G. (2026). Carbohydrate counting in traditional Turkish fast foods for individuals with type 1 diabetes: Can artificial intelligence models replace dietitians? *Nutrition*, 142, 112986.
-- Alfonsi, J. E. et al. (2020). Carbohydrate counting app using image recognition for youth with Type 1 diabetes. *JMIR MHealth and UHealth*, 8(10), e22074.
-- O'Hara, C. et al. (2025). An evaluation of ChatGPT for nutrient content estimation from meal photographs. *Nutrients*, 17(4), 607.
-- Bossard, L. et al. (2014). Food-101 — Mining discriminative components with random forests. *ECCV*.

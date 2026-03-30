@@ -1,4 +1,4 @@
-# Dataset — too large for GitHub (Food-101 is ~5GB)
+
 data/
 
 # Trained model weights
@@ -7,10 +7,10 @@ models/
 *.pt
 *.ckpt
 
-# Generated outputs — reproducible from code
+# Generated outputs
 results/
 
-# API keys — NEVER commit these
+# API keys 
 .env
 *.env
 
@@ -36,6 +36,9 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Word documents — dissertation draft, keep off GitHub
+*.docx
 
 # Jupyter
 .ipynb_checkpoints/

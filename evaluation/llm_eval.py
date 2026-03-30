@@ -1,292 +1,195 @@
 """
 evaluation/llm_eval.py
 =======================
-Sends food images to LLMs and collects carb range predictions.
+Evaluates GPT-5 on the same carbohydrate range classification task
+as the ResNet-50 model, using food images from the final_eval test set.
 
-Supports:
-  - Anthropic Claude  (--provider anthropic)
-  - OpenAI GPT-4o     (--provider openai)
-  - Both              (--provider both)
+Each image is sent to GPT-5 with a structured prompt asking it to
+classify the food into one of 5 carbohydrate ranges. Results are
+saved to results/gpt5_results.json for comparison with ResNet-50.
 
-Both use the IDENTICAL prompt so results are directly comparable.
+Usage:
+    python run.py --stage llm                   # all test images
+    python run.py --stage llm --limit 50        # 50 images (cheap test ~$0.50)
 
-API keys go in a .env file in the project root (never committed to Git):
-  ANTHROPIC_API_KEY=sk-ant-...
-  OPENAI_API_KEY=sk-...
+Requirements:
+    OPENAI_API_KEY in your .env file
+    pip install openai
+
+NOTE: Check the current GPT-5 model ID at platform.openai.com/docs/models
+      and update GPT5_MODEL below if needed.
 """
 
 import base64
 import json
 import os
-import re
 import time
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
+from openai import OpenAI
 from sklearn.metrics import classification_report, confusion_matrix
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import DATASET_DIR, RESULTS_DIR, CARB_RANGE_LABELS
+from config import (
+    DATASET_DIR, RESULTS_DIR,
+    NUM_CARB_RANGES, CARB_RANGE_LABELS,
+)
+from pipeline.train_direct import CarbRangeDataset
+from torchvision import transforms
 
-RANGE_LABELS    = list(CARB_RANGE_LABELS.values())
-MAX_RETRIES     = 3
-RETRY_DELAY     = 5
+# -- Update this if OpenAI releases a different model ID --------------
+GPT5_MODEL = "gpt-5.4"
+# ---------------------------------------------------------------------
 
-# ── Identical prompt sent to ALL LLMs ─────────────────────────────
-SYSTEM_PROMPT = """You are an expert clinical dietitian specialising in type 1 diabetes.
+RANGE_LABELS = list(CARB_RANGE_LABELS.values())
 
-Estimate the total carbohydrate content of the meal in the image,
-considering BOTH what the food is AND the portion size visible.
+SYSTEM_PROMPT = """You are a clinical nutrition expert helping people with
+Type 1 diabetes count carbohydrates from food photographs.
 
-Respond ONLY with valid JSON — no text outside the JSON object:
+Your task: look at the food image and estimate its total carbohydrate content,
+then classify it into exactly one of these ranges:
 
-{
-  "food_identified": "<food name>",
-  "portion_assessment": "small" | "medium" | "large",
-  "estimated_carbs_grams": <integer>,
-  "carb_range": <integer 0-4>,
-  "confidence": "low" | "medium" | "high",
-  "reasoning": "<one sentence>"
-}
+  Range 0: 0–20g   (e.g. salad, clear soup, grilled fish, eggs)
+  Range 1: 21–40g  (e.g. small sandwich, cup of soup with bread, sushi)
+  Range 2: 41–60g  (e.g. standard pizza slice, bowl of pasta, burger)
+  Range 3: 61–80g  (e.g. large bowl of rice, fish and chips, big burrito)
+  Range 4: 81g+    (e.g. full plate of pasta, large dessert, full pizza)
 
-Carb range values:
-  0 = 0 to 20 grams    (salads, eggs, plain proteins)
-  1 = 21 to 40 grams   (soups, light sandwiches)
-  2 = 41 to 60 grams   (standard pasta, pizza slice, rice)
-  3 = 61 to 80 grams   (large burger, cake slice, big pasta)
-  4 = 81 grams or more (large desserts, multiple portions)"""
+Consider BOTH the type of food AND the portion size visible in the image.
 
-
-def encode_image(path: str) -> tuple:
-    ext  = Path(path).suffix.lower().lstrip(".")
-    mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8"), mime
+Respond with ONLY valid JSON in this exact format:
+{"range": <integer 0-4>, "confidence": <float 0.0-1.0>, "reasoning": "<brief explanation>"}"""
 
 
-def grams_to_range(g: int) -> int:
-    if g <= 20:   return 0
-    elif g <= 40: return 1
-    elif g <= 60: return 2
-    elif g <= 80: return 3
-    else:         return 4
+def encode_image(img_path: str) -> str:
+    with open(img_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
 
-def parse_response(raw: str) -> dict:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    try:
-        parsed = json.loads(text)
-        cr = int(parsed.get("carb_range", -1))
-        if cr not in range(5):
-            cr = grams_to_range(int(parsed.get("estimated_carbs_grams", 50)))
-        parsed["carb_range"] = cr
-        return parsed
-    except (json.JSONDecodeError, ValueError):
-        nums = re.findall(r'\b([0-4])\b', text)
-        return {"carb_range": int(nums[0]) if nums else 2, "parse_error": True}
-
-
-# ──────────────────────────────────────────────
-# PROVIDER FUNCTIONS
-# ──────────────────────────────────────────────
-
-def query_anthropic(client, path: str) -> dict:
-    b64, mime = encode_image(path)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=300,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": [
-                    {"type": "image",
-                     "source": {"type": "base64", "media_type": mime, "data": b64}},
-                    {"type": "text", "text": "Estimate the carbohydrate range."},
-                ]}],
-            )
-            return parse_response(resp.content[0].text)
-        except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                return {"carb_range": -1, "error": str(e)}
-
-
-def query_openai(client, path: str) -> dict:
-    b64, mime = encode_image(path)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": [
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}},
-                        {"type": "text", "text": "Estimate the carbohydrate range."},
-                    ]},
+def query_gpt5(client: OpenAI, img_path: str) -> dict:
+    """Send one image to GPT-5 and return parsed response."""
+    b64 = encode_image(img_path)
+    response = client.chat.completions.create(
+        model=GPT5_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{b64}",
+                            "detail": "low",   # cheaper, sufficient for food classification
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "What carbohydrate range does this food fall into?",
+                    },
                 ],
-                max_tokens=300,
-                temperature=0,
-            )
-            return parse_response(resp.choices[0].message.content)
-        except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                return {"carb_range": -1, "error": str(e)}
+            },
+        ],
+        max_completion_tokens=150,
+        temperature=0,   # deterministic output
+    )
+    raw = response.choices[0].message.content.strip()
+    # Strip markdown code fences if present
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw)
 
 
-# ──────────────────────────────────────────────
-# EVALUATION RUNNER
-# ──────────────────────────────────────────────
+def evaluate(limit: int = None):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("\n  ERROR: OPENAI_API_KEY not set in .env")
+        print("  Add your key to .env:  OPENAI_API_KEY=sk-...")
+        return
 
-def collect_images(limit: int = None) -> list:
-    eval_dir = Path(DATASET_DIR) / "final_eval"
-    samples  = []
-    for range_dir in sorted(eval_dir.iterdir()):
-        if not range_dir.is_dir():
-            continue
-        label = int(range_dir.name.split("_")[1])
-        for img in range_dir.glob("*.jpg"):
-            samples.append((str(img), label))
+    client = OpenAI(api_key=api_key)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
+    # Load the same test set as ResNet-50
+    eval_dir = str(Path(DATASET_DIR) / "final_eval")
+    test_ds   = CarbRangeDataset(eval_dir, transforms.ToTensor(), split=None)
+    samples   = test_ds.samples
     if limit:
-        per_class = max(1, limit // 5)
-        buckets   = {i: [] for i in range(5)}
-        for path, label in samples:
-            buckets[label].append((path, label))
-        balanced = []
-        for i in range(5):
-            balanced.extend(buckets[i][:per_class])
-        return balanced
-    return samples
+        import random
+        random.seed(42)
+        samples = random.sample(samples, min(limit, len(samples)))
 
+    print(f"\n  GPT-5 Evaluation")
+    print(f"  Model:  {GPT5_MODEL}")
+    print(f"  Images: {len(samples):,}")
+    print(f"  Note:   detail=low to minimise cost\n")
 
-def run_evaluation(provider: str, query_fn, model_name: str,
-                   samples: list, save_tag: str):
-
-    print(f"\n{'═'*60}")
-    print(f"  LLM: {model_name}")
-    print(f"  Images: {len(samples)}  |  Est. cost: £{len(samples)*0.02:.2f}")
-    print(f"{'═'*60}")
-
-    results     = []
-    true_labels = []
-    pred_labels = []
-    errors      = 0
+    true_labels, pred_labels, confidences = [], [], []
+    errors = 0
 
     for i, (img_path, true_label) in enumerate(samples):
-        response   = query_fn(img_path)
-        pred_range = response.get("carb_range", -1)
+        try:
+            result = query_gpt5(client, img_path)
+            pred   = int(result["range"])
+            conf   = float(result.get("confidence", 0.5))
 
-        if pred_range == -1:
-            errors += 1
-        else:
+            # Clamp to valid range
+            pred = max(0, min(NUM_CARB_RANGES - 1, pred))
+
             true_labels.append(true_label)
-            pred_labels.append(pred_range)
+            pred_labels.append(pred)
+            confidences.append(conf)
 
-        results.append({
-            "image":         img_path,
-            "true_range":    true_label,
-            "pred_range":    pred_range,
-            "food_id":       response.get("food_identified", ""),
-            "portion":       response.get("portion_assessment", ""),
-            "carbs_g":       response.get("estimated_carbs_grams"),
-            "confidence":    response.get("confidence", ""),
-            "reasoning":     response.get("reasoning", ""),
-            "error":         "error" in response,
-        })
+        except Exception as e:
+            errors += 1
+            if errors <= 3:
+                print(f"  !! API error: {e}")
+            true_labels.append(true_label)
+            pred_labels.append(2)
+            confidences.append(0.0)
 
-        if (i + 1) % 10 == 0 or (i + 1) == len(samples):
-            acc = (sum(t == p for t, p in zip(true_labels, pred_labels))
-                   / len(true_labels)) if true_labels else 0
-            print(f"  [{i+1:4d}/{len(samples)}]  acc={acc:.3f}  "
-                  f"true={true_label}  pred={pred_range}  errors={errors}")
+        if (i + 1) % 25 == 0:
+            acc = sum(t == p for t, p in zip(true_labels, pred_labels)) / len(true_labels)
+            print(f"  [{i+1:5d}/{len(samples):5d}]  running acc={acc:.3f}  errors={errors}")
 
-        time.sleep(0.8)
+        # Respect OpenAI rate limits
+        time.sleep(0.5)
 
     labels = np.array(true_labels)
     preds  = np.array(pred_labels)
-    acc      = (labels == preds).mean()
-    clin_acc = (np.abs(labels - preds) <= 1).mean()
-    report   = classification_report(labels, preds, target_names=RANGE_LABELS,
-                                     output_dict=True, zero_division=0)
-    cm = confusion_matrix(labels, preds)
 
-    print(f"\n  Accuracy:                 {acc:.3f}  ({acc*100:.1f}%)")
-    print(f"  Clinically acceptable:    {clin_acc:.3f}  ({clin_acc*100:.1f}%)")
+    acc       = float((labels == preds).mean())
+    clin_acc  = float((np.abs(labels - preds) <= 1).mean())
+    dangerous = float((np.abs(labels - preds) >= 2).mean())
+    report    = classification_report(
+        labels, preds,
+        labels=list(range(NUM_CARB_RANGES)),
+        target_names=RANGE_LABELS,
+        output_dict=True, zero_division=0,
+    )
+
+    print(f"\n  {'-'*50}")
+    print(f"  GPT-5 Results")
+    print(f"  {'-'*50}")
+    print(f"  Exact accuracy:           {acc:.3f}  ({acc*100:.1f}%)")
+    print(f"  Clinical acc (+-1 range):  {clin_acc:.3f}  ({clin_acc*100:.1f}%)")
+    print(f"  Dangerous preds (+-2+):    {dangerous:.3f}  ({dangerous*100:.1f}%)")
     print(f"  API errors:               {errors}")
 
-    # Confusion matrix
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(cm, cmap="Blues")
-    ax.set_title(f"{model_name} — Confusion Matrix", fontweight="bold")
-    ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-    ax.set_xticks(range(5)); ax.set_yticks(range(5))
-    ax.set_xticklabels(RANGE_LABELS, rotation=30, ha="right")
-    ax.set_yticklabels(RANGE_LABELS)
-    plt.colorbar(im, ax=ax)
-    thresh = cm.max() / 2
-    for i in range(5):
-        for j in range(5):
-            ax.text(j, i, str(cm[i, j]), ha="center", va="center",
-                    color="white" if cm[i, j] > thresh else "black")
-    plt.tight_layout()
-    cm_path = os.path.join(RESULTS_DIR, f"cm_{save_tag}.png")
-    plt.savefig(cm_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  ✓ Confusion matrix → {cm_path}")
-
-    output = {
-        "model":                                   model_name,
-        "test_accuracy":                           round(float(acc), 4),
-        "clinically_acceptable_accuracy_±1_range": round(float(clin_acc), 4),
+    result = {
+        "model":                                   f"GPT-5 ({GPT5_MODEL})",
+        "images_evaluated":                        len(samples),
+        "test_accuracy":                           round(acc, 4),
+        "clinically_acceptable_accuracy_+-1_range": round(clin_acc, 4),
+        "dangerous_predictions_+-2_ranges":         round(dangerous, 4),
+        "api_errors":                              errors,
         "classification_report":                   report,
-        "confusion_matrix":                        cm.tolist(),
-        "per_image_results":                       results,
+        "confusion_matrix":                        confusion_matrix(labels, preds).tolist(),
     }
-    out_path = os.path.join(RESULTS_DIR, f"{save_tag}_results.json")
+
+    out_path = os.path.join(RESULTS_DIR, "gpt5_results.json")
     with open(out_path, "w") as f:
-        json.dump(output, f, indent=2)
-    print(f"  ✓ Results → {out_path}")
-    return output
-
-
-def evaluate(provider: str = "anthropic", limit: int = None):
-    samples = collect_images(limit=limit)
-    print(f"\nTest images: {len(samples)}")
-
-    if provider in ("anthropic", "both"):
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            print("\nERROR: ANTHROPIC_API_KEY not set in .env")
-        else:
-            try:
-                import anthropic
-                client = anthropic.Anthropic(api_key=key)
-                run_evaluation("anthropic",
-                               lambda p: query_anthropic(client, p),
-                               "Claude (Anthropic)", samples, "claude")
-            except ImportError:
-                print("Run: pip install anthropic")
-
-    if provider in ("openai", "both"):
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            print("\nERROR: OPENAI_API_KEY not set in .env")
-        else:
-            try:
-                from openai import OpenAI
-                client = OpenAI(api_key=key)
-                run_evaluation("openai",
-                               lambda p: query_openai(client, p),
-                               "GPT-4o (OpenAI)", samples, "gpt4o")
-            except ImportError:
-                print("Run: pip install openai")
+        json.dump(result, f, indent=2)
+    print(f"\n  OK Results saved -> {out_path}")

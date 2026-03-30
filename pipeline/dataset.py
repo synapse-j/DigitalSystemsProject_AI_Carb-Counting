@@ -1,11 +1,13 @@
 """
 pipeline/dataset.py
 ====================
-Downloads Food-101 and builds three dataset folders:
+Downloads Food-101 and builds two dataset folders:
 
-  data/carb_dataset/stage1/   — food category labels (101 classes)
-  data/carb_dataset/stage2/   — portion size labels  (small/medium/large)
-  data/carb_dataset/final_eval/ — carb range ground truth for test set
+  data/carb_dataset/train_eval/ - carb range labels for Food-101 TRAIN split (model training)
+  data/carb_dataset/final_eval/ - carb range labels for Food-101 TEST split  (evaluation only)
+
+Keeping train_eval and final_eval separate prevents data leakage:
+the model trains on train_eval and is evaluated on the unseen final_eval.
 """
 
 import json
@@ -24,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
     DATA_DIR, FOOD101_DIR, DATASET_DIR,
     FOOD_BASE_CARBS, PORTION_MULTIPLIER,
-    CARB_RANGE_LABELS, IMAGES_PER_CLASS,
-    grams_to_range,
+    IMAGES_PER_CLASS, grams_to_range,
 )
 
 FOOD101_URL = "http://data.vision.ee.ethz.ch/cvl/food-101.tar.gz"
@@ -41,7 +42,7 @@ def download_food101():
     dest.mkdir(parents=True, exist_ok=True)
 
     if extract_dir.exists():
-        print("✓ Food-101 already downloaded.")
+        print("OK Food-101 already downloaded.")
         return
 
     tar_path = dest / "food-101.tar.gz"
@@ -50,7 +51,7 @@ def download_food101():
 
     def _hook(count, block, total):
         pct = min(int(count * block * 100 / total), 100)
-        bar = "█" * (pct // 5)
+        bar = "=" * (pct // 5)
         print(f"\r  {pct:3d}%  {bar:<20}", end="", flush=True)
 
     urllib.request.urlretrieve(FOOD101_URL, str(tar_path), reporthook=_hook)
@@ -58,7 +59,7 @@ def download_food101():
     with tarfile.open(str(tar_path), "r:gz") as tar:
         tar.extractall(str(dest))
     tar_path.unlink()
-    print("✓ Extraction complete.")
+    print("OK Extraction complete.")
 
 
 # ──────────────────────────────────────────────
@@ -102,17 +103,13 @@ def build_datasets():
 
     with open(meta_dir / "train.txt") as f:
         train_keys = set(line.strip() for line in f)
-    with open(meta_dir / "test.txt") as f:
-        test_keys  = set(line.strip() for line in f)
 
-    s1_dir   = Path(DATASET_DIR) / "stage1"
-    s2_dir   = Path(DATASET_DIR) / "stage2"
-    eval_dir = Path(DATASET_DIR) / "final_eval"
+    train_dir = Path(DATASET_DIR) / "train_eval"
+    eval_dir  = Path(DATASET_DIR) / "final_eval"
 
-    stats    = {
-        "stage1": {"train": 0, "val": 0, "test": 0},
-        "stage2": {"small": 0, "medium": 0, "large": 0},
-        "final":  {str(r): 0 for r in range(5)},
+    stats = {
+        "train": {str(r): 0 for r in range(5)},
+        "final": {str(r): 0 for r in range(5)},
     }
     records  = []
 
@@ -131,28 +128,23 @@ def build_datasets():
             split   = ("train" if hash(img_path.name) % 5 != 0 else "val") \
                       if key in train_keys else "test"
 
-            # Stage 1 — food category
-            dest = s1_dir / split / food_class
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(img_path, dest / img_path.name)
-            stats["stage1"][split] += 1
+            portion = estimate_portion(img_path)
 
-            # Stage 2 — portion size
-            portion      = estimate_portion(img_path)
-            portion_name = ["small", "medium", "large"][portion]
-            dest2        = s2_dir / split / portion_name
-            dest2.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(img_path, dest2 / f"{food_class}_{img_path.name}")
-            stats["stage2"][portion_name] += 1
-
-            # Final eval ground truth (test set only)
+            # Carb range ground truth
             final_carbs = int(base_carbs * PORTION_MULTIPLIER[portion])
             carb_range  = grams_to_range(final_carbs)
             if split == "test":
+                # final_eval - unseen holdout used for evaluation only
                 dest3 = eval_dir / f"range_{carb_range}"
                 dest3.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(img_path, dest3 / f"{food_class}_{img_path.name}")
                 stats["final"][str(carb_range)] += 1
+            else:
+                # train_eval - Food-101 TRAIN images labelled by carb range
+                dest4 = train_dir / f"range_{carb_range}"
+                dest4.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(img_path, dest4 / f"{food_class}_{img_path.name}")
+                stats["train"][str(carb_range)] += 1
 
             records.append({
                 "image":       str(img_path),
@@ -168,7 +160,6 @@ def build_datasets():
     with open(Path(DATASET_DIR) / "metadata.json", "w") as f:
         json.dump({"stats": stats, "records": records}, f, indent=2)
 
-    print("\n✓ Datasets built.")
-    print(f"\n  Stage 1 (food category):        {stats['stage1']}")
-    print(f"  Stage 2 (portion size):         {stats['stage2']}")
+    print("\nOK Datasets built.")
+    print(f"\n  Train eval (carb range counts): {stats['train']}")
     print(f"  Final eval (carb range counts): {stats['final']}")
