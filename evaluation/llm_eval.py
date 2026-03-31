@@ -16,8 +16,6 @@ Requirements:
     OPENAI_API_KEY in your .env file
     pip install openai
 
-NOTE: Check the current GPT-5 model ID at platform.openai.com/docs/models
-      and update GPT5_MODEL below if needed.
 """
 
 import base64
@@ -52,10 +50,10 @@ Type 1 diabetes count carbohydrates from food photographs.
 Your task: look at the food image and estimate its total carbohydrate content,
 then classify it into exactly one of these ranges:
 
-  Range 0: 0–20g   (e.g. salad, clear soup, grilled fish, eggs)
-  Range 1: 21–40g  (e.g. small sandwich, cup of soup with bread, sushi)
-  Range 2: 41–60g  (e.g. standard pizza slice, bowl of pasta, burger)
-  Range 3: 61–80g  (e.g. large bowl of rice, fish and chips, big burrito)
+  Range 0: 0-20g   (e.g. salad, clear soup, grilled fish, eggs)
+  Range 1: 21-40g  (e.g. small sandwich, cup of soup with bread, sushi)
+  Range 2: 41-60g  (e.g. standard pizza slice, bowl of pasta, burger)
+  Range 3: 61-80g  (e.g. large bowl of rice, fish and chips, big burrito)
   Range 4: 81g+    (e.g. full plate of pasta, large dessert, full pizza)
 
 Consider BOTH the type of food AND the portion size visible in the image.

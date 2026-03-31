@@ -35,20 +35,20 @@ def _header(title: str):
 
 def stage_data():
     _header("STAGE 1 / 4 - Prepare Dataset")
-    from pipeline.dataset import download_food101, build_datasets
+    from Train.dataset import download_food101, build_datasets
     download_food101()
     build_datasets()
 
 
 def stage_train():
     _header("STAGE 2 / 4 - Train ResNet-50 (Ordinal Focal Loss)")
-    from pipeline.train_direct import train
+    from Train.train_direct import train
     train()
 
 
 def stage_evaluate():
     _header("STAGE 3 / 4 - Evaluate Model (TTA x8)")
-    from pipeline.evaluate_direct import evaluate
+    from Train.evaluate_direct import evaluate
     evaluate()
 
 

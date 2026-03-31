@@ -45,7 +45,7 @@ from config import (
     DATASET_DIR, RESULTS_DIR, DEVICE,
     NUM_CARB_RANGES, CARB_RANGE_LABELS,
 )
-from pipeline.train_direct import CarbRangeDataset, MODEL_DIR
+from Train.train_direct import CarbRangeDataset, MODEL_DIR
 
 # ==================================================================
 # CONSTANTS
