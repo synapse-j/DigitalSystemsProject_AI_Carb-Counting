@@ -79,9 +79,9 @@ python run.py
 
 # Or run one stage at a time
 python run.py --stage data       # Download Food-101 and sort images into carb ranges
-python run.py --stage train      # Train the ResNet-50 model (this takes a while)
+python run.py --stage train      # Train the ResNet-50 model 
 python run.py --stage evaluate   # Evaluate the trained model on the test set
-python run.py --stage llm --limit 25   # Quick GPT-5 test on 25 images (~£0.50)
+python run.py --stage llm --limit 1200  # GPT-5.4 Test
 python run.py --stage llm        # Full GPT-5 evaluation
 python run.py --stage compare    # Generate the dissertation figures
 ```
