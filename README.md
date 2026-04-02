@@ -1,15 +1,11 @@
 # AI Carbohydrate Counting for Type 1 Diabetes
-**Jake Richardson-Price — BSc Digital Systems — Final Year Dissertation**
+**Jake Richardson-Price Digital Systems project**
 
 ---
 
 ## What is this project?
 
-People with Type 1 diabetes have to count the carbohydrates in every meal they eat so they can work out how much insulin to inject. Get it wrong and blood sugar either spikes or crashes — both of which are dangerous. It's a task most people have to do multiple times a day, every day, for life.
-
 I wanted to see if AI could help with this. Specifically, I trained a image classification model on food photos and asked it to predict which "carb range" a meal falls into. I then compared how well it did against GPT-5, which can look at a photo and answer questions about it without any specialised training.
-
-The core question I'm trying to answer: **does training a model specifically for this task beat just asking a general-purpose AI?**
 
 ---
 
